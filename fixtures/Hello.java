@@ -1,0 +1,1 @@
+public class Hello { public static void main(String[] args) { if (!System.getProperty("java.version").startsWith("1.8.")) throw new AssertionError("Expected Java 8"); System.out.println("Java 8 fixture passed"); } }

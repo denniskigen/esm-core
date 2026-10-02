@@ -1,0 +1,220 @@
+name: O3 Node 24 action compatibility
+'on':
+  push:
+    branches:
+    - codex/node24-action-smoke
+permissions:
+  contents: read
+jobs:
+  node:
+    name: Node setup and npm cache (${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+        - 16.x
+        - '18'
+        - '20'
+        - '22'
+        - '24'
+    steps:
+    - &id001
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: ${{ matrix.node }}
+        cache: npm
+        registry-url: https://registry.npmjs.org
+    - name: Install and execute fixture
+      shell: bash
+      run: |
+        npm ci --ignore-scripts
+        npm test
+  producer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - *id001
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: '22'
+        package-manager-cache: false
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      id: cache
+      with:
+        path: ${{ runner.temp }}/node24-cache
+        key: node24-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    - name: Write cache payload
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/node24-cache"
+        printf "%s\n" "$GITHUB_SHA" > "$RUNNER_TEMP/node24-cache/commit"
+    - name: Start disposable containers
+      shell: bash
+      run: |
+        docker run --name node24-stopped alpine:3.22 sh -c 'echo stopped-stdout; echo stopped-stderr >&2'
+        docker run -d --name node24-running alpine:3.22 sh -c 'echo running-stdout; echo running-stderr >&2; sleep 300'
+        for _attempt in {1..20}; do
+          if docker logs node24-running 2>&1 | grep -q running-stderr; then break; fi
+          sleep 1
+        done
+    - name: Run exact replacement log script
+      shell: bash
+      run: |
+        mkdir -p ./logs
+        containers=$(docker ps --all --format '{{.Names}}')
+        while IFS= read -r container; do
+          if [ -n "$container" ]; then
+            if ! docker logs "$container" > "./logs/$container.log" 2>&1; then
+              echo "::warning::Could not collect logs for container $container"
+            fi
+          fi
+        done <<< "$containers"
+      working-directory: ${{ runner.temp }}
+    - name: Verify real Docker output
+      shell: bash
+      run: |
+        grep -Fx stopped-stdout "$RUNNER_TEMP/logs/node24-stopped.log"
+        grep -Fx stopped-stderr "$RUNNER_TEMP/logs/node24-stopped.log"
+        grep -Fx running-stdout "$RUNNER_TEMP/logs/node24-running.log"
+        grep -Fx running-stderr "$RUNNER_TEMP/logs/node24-running.log"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: node24-docker-logs
+        path: ${{ runner.temp }}/logs
+        if-no-files-found: error
+        retention-days: 1
+    - name: Remove test containers
+      shell: bash
+      run: |
+        docker rm -f node24-running node24-stopped
+      if: always()
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      id: cache
+      with:
+        path: ${{ runner.temp }}/node24-cache
+        key: node24-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+        fail-on-cache-miss: true
+    - name: Verify cache restored
+      shell: bash
+      run: |
+        test "$CACHE_HIT" = true
+        test "$(cat "$RUNNER_TEMP/node24-cache/commit")" = "$GITHUB_SHA"
+      env:
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: node24-docker-logs
+        path: ${{ runner.temp }}/downloaded
+    - name: Verify artifact restored
+      shell: bash
+      run: |
+        grep -Fx stopped-stderr "$RUNNER_TEMP/downloaded/node24-stopped.log"
+        grep -Fx running-stdout "$RUNNER_TEMP/downloaded/node24-running.log"
+  java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - *id001
+    - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+      with:
+        distribution: temurin
+        java-version: '8'
+    - name: Compile and execute using Java 8
+      shell: bash
+      run: |
+        javac fixtures/Hello.java
+        java -cp fixtures Hello
+        mvn --batch-mode --file fixtures/pom.xml verify
+  pull-request:
+    name: Create-pull-request no-change path
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: 0
+    - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
+      id: cpr
+      with:
+        token: ${{ github.token }}
+        base: codex/node24-action-smoke
+        branch: codex/node24-no-change-${{ github.run_id }}
+    - name: Verify no PR was created
+      shell: bash
+      run: |
+        test -z "$PR_NUMBER"
+        test -z "$(git status --porcelain)"
+      env:
+        PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+  codeql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - *id001
+    - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
+      with:
+        languages: javascript
+    - uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
+    - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
+      with:
+        upload: false
+        output: ${{ runner.temp }}/sarif
+    - name: Verify analysis output
+      shell: bash
+      run: |
+        test -n "$(find "$RUNNER_TEMP/sarif" -name "*.sarif" -print -quit)"
+  release:
+    name: Release action against loopback mock API
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - *id001
+    - name: Start isolated API mock
+      shell: bash
+      run: |
+        python3 fixtures/mock-github.py "$RUNNER_TEMP/release-requests.json" > "$RUNNER_TEMP/mock-server.log" 2>&1 &
+        for _attempt in {1..20}; do
+          if curl --fail --silent http://127.0.0.1:8765/health; then exit 0; fi
+          sleep 1
+        done
+        exit 1
+    - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+      id: release
+      env:
+        GITHUB_API_URL: http://127.0.0.1:8765
+        GITHUB_TOKEN: invalid-placeholder-for-local-mock
+      with:
+        token: invalid-placeholder-for-local-mock
+        repository: test/node24-smoke
+        tag_name: v0.0.0-smoke
+        name: Release v0.0.0-smoke
+        generate_release_notes: true
+        body: Smoke test release body
+        draft: false
+        prerelease: false
+    - name: Verify release requests were local
+      shell: bash
+      run: |
+        python3 - <<'CHECK'
+        import json,os
+        requests=json.load(open(os.environ['RUNNER_TEMP']+'/release-requests.json'))
+        created=[r for r in requests if r['method']=='POST' and r['path']=='/repos/test/node24-smoke/releases']
+        assert len(created)==1,requests
+        assert created[0]['body']['tag_name']=='v0.0.0-smoke'
+        assert created[0]['body']['name']=='Release v0.0.0-smoke'
+        assert os.environ['RELEASE_ID']=='123',os.environ['RELEASE_ID']
+        print('Release action completed using only a loopback API and an invalid placeholder token')
+        CHECK
+      env:
+        RELEASE_ID: ${{ steps.release.outputs.id }}
