@@ -189,20 +189,33 @@ jobs:
           sleep 1
         done
         exit 1
-    - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
-      id: release
-      env:
-        GITHUB_API_URL: http://127.0.0.1:8765
-        GITHUB_TOKEN: invalid-placeholder-for-local-mock
+    - name: Fetch exact release action bundle
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        token: invalid-placeholder-for-local-mock
-        repository: test/node24-smoke
-        tag_name: v0.0.0-smoke
-        name: Release v0.0.0-smoke
-        generate_release_notes: true
-        body: Smoke test release body
-        draft: false
-        prerelease: false
+        repository: softprops/action-gh-release
+        ref: efb35369e0ad2afab669f228072c1b0d510eae64
+        path: release-action
+        persist-credentials: false
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - name: Execute pinned release bundle under Node 24
+      id: release
+      shell: bash
+      env:
+        INPUT_TOKEN: invalid-placeholder-for-local-mock
+        INPUT_REPOSITORY: test/node24-smoke
+        INPUT_TAG_NAME: v0.0.0-smoke
+        INPUT_NAME: Release v0.0.0-smoke
+        INPUT_GENERATE_RELEASE_NOTES: 'true'
+        INPUT_BODY: Smoke test release body
+        INPUT_DRAFT: 'false'
+        INPUT_PRERELEASE: 'false'
+      run: |
+        export GITHUB_API_URL=http://127.0.0.1:8765
+        export GITHUB_TOKEN=invalid-placeholder-for-local-mock
+        node release-action/dist/index.js
     - name: Verify release requests were local
       shell: bash
       run: |
